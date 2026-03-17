@@ -1,54 +1,48 @@
-export const runtime = "nodejs"; // Forces Node.js instead of Edge
+export const runtime = "nodejs";
 
 export async function GET() {
-  const clientId = process.env.OPENSKY_CLIENT_ID;
-  const clientSecret = process.env.OPENSKY_CLIENT_SECRET;
-
+  // 1. Correct URLs from the official 2026 OpenSky REST API docs
   const tokenUrl =
     "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token";
   const dataUrl =
     "https://opensky-network.org/api/states/all?lamin=32.0&lomin=-98.0&lamax=34.0&lomax=-96.0";
 
   try {
-    console.log("Starting OAuth Handshake...");
+    // 2. Official OpenSky fetch method: Credentials in the BODY
+    const body = new URLSearchParams();
+    body.append("grant_type", "client_credentials");
+    body.append("client_id", process.env.OPENSKY_CLIENT_ID || "");
+    body.append("client_secret", process.env.OPENSKY_CLIENT_SECRET || "");
+
     const authRes = await fetch(tokenUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
-        "User-Agent": "FernandoRadar/1.0",
       },
-      body: new URLSearchParams({ grant_type: "client_credentials" }),
+      body: body.toString(),
+      cache: "no-store",
     });
 
     if (!authRes.ok) {
-      const errText = await authRes.text();
-      console.error("❌ OAuth Step 1 Failed:", errText);
-      return Response.json({ step: 1, error: errText }, { status: 401 });
+      const errorText = await authRes.text();
+      return Response.json(
+        { error: "Auth Step 1 Fail", details: errorText },
+        { status: 401 },
+      );
     }
 
     const { access_token } = await authRes.json();
-    console.log("✅ Token Acquired. Fetching planes...");
 
+    // 3. Fetch Data with the new token
     const res = await fetch(dataUrl, {
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-        "User-Agent": "FernandoRadar/1.0",
-      },
+      headers: { Authorization: `Bearer ${access_token}` },
+      cache: "no-store",
     });
-
-    if (!res.ok) {
-      console.error("❌ OAuth Step 2 Failed:", res.status);
-      return Response.json(
-        { step: 2, status: res.status },
-        { status: res.status },
-      );
-    }
 
     const data = await res.json();
     return Response.json(data);
   } catch (error: any) {
-    console.error("💀 Network Crash:", error.message);
+    // If it still says "fetch failed", it means DNS is failing to find 'auth.opensky-network.org'
     return Response.json(
       { error: "fetch failed", message: error.message },
       { status: 500 },
