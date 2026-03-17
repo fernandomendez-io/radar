@@ -14,26 +14,103 @@ interface Flight {
   heading: number;
 }
 
+// Bypasses CSP 'eval' issues by disabling the worker thread for Raster
+if (typeof window !== "undefined") {
+  maplibregl.workerCount = 0;
+}
+
 export default function TacticalMapPage() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const markers = useRef<{ [key: string]: maplibregl.Marker }>({});
   const [flights, setFlights] = useState<Flight[]>([]);
   const trails = useRef<{ [key: string]: [number, number][] }>({});
+  const [zuluTime, setZuluTime] = useState("");
 
-  // 1. Initialize Map
+  // 1. ZULU CLOCK TIMER
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = new Date();
+      setZuluTime(now.toISOString().substring(11, 19) + "Z");
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // 2. INITIALIZE MAP (Raster Mode to avoid Black Screen)
+  useEffect(() => {
+    if (map.current || !mapContainer.current) return;
+
+    const mapInstance = new maplibregl.Map({
+      container: mapContainer.current,
+      style: {
+        version: 8,
+        sources: {
+          "raster-tiles": {
+            type: "raster",
+            tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"],
+            tileSize: 256,
+            attribution: "© CARTO",
+          },
+        },
+        layers: [
+          {
+            id: "simple-tiles",
+            type: "raster",
+            source: "raster-tiles",
+            minzoom: 0,
+            maxzoom: 18,
+          },
+        ],
+      },
+      center: [-97.0403, 32.8982], // DFW
+      zoom: 10,
+    });
+
+    mapInstance.on("load", () => {
+      map.current = mapInstance;
+
+      // Add Trail Source & Layer
+      mapInstance.addSource("plane-trails", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+
+      mapInstance.addLayer({
+        id: "plane-trails-layer",
+        type: "line",
+        source: "plane-trails",
+        layout: { "line-join": "round", "line-cap": "round" },
+        paint: {
+          "line-color": "#10b981",
+          "line-width": 2,
+          "line-opacity": 0.4,
+          "line-dasharray": [2, 1],
+        },
+      });
+    });
+
+    return () => {
+      mapInstance.remove();
+      map.current = null;
+    };
+  }, []);
+
+  // 3. RADAR SWEEP LOGIC
   useEffect(() => {
     const updateRadar = async () => {
       try {
-        // 1. Fetching directly from OpenSky (Client-Side)
         const res = await fetch(
           "https://opensky-network.org/api/states/all?lamin=32.5&lomin=-97.5&lamax=33.5&lomax=-96.5",
+          {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            mode: "cors",
+          },
         );
 
         if (!res.ok) throw new Error("Signal Lost");
         const rawData = await res.json();
 
-        // 2. Process the raw array into our Flight interface
         const data: Flight[] = (rawData.states || []).map((s: any) => ({
           icao24: s[0],
           callsign: s[1].trim(),
@@ -51,7 +128,6 @@ export default function TacticalMapPage() {
 
         const currentIcaos = data.map((f: Flight) => f.icao24);
 
-        // --- REMAINDER OF YOUR MARKER & TRAIL LOGIC ---
         data.forEach((f: Flight) => {
           const isCompany =
             f.callsign.startsWith("ENY") || f.callsign.startsWith("AAL");
@@ -64,7 +140,6 @@ export default function TacticalMapPage() {
           const opacity = isLow ? "0.3" : "1";
           const labelDisplay = isLow && !isCompany ? "none" : "block";
 
-          // Trail recording
           if (!f.on_ground) {
             if (!trails.current[f.icao24]) trails.current[f.icao24] = [];
             trails.current[f.icao24].push([f.longitude, f.latitude]);
@@ -90,24 +165,23 @@ export default function TacticalMapPage() {
               label.innerHTML = `${f.callsign || "UNK"}<br>${altFt.toLocaleString()}FT<br>${kts}KT`;
             }
           } else {
-            // Create New Marker logic (Same as you had before)
             const el = document.createElement("div");
             el.className = "radar-blip-container";
             el.style.opacity = opacity;
             el.style.zIndex = isLow ? "1" : "100";
             el.innerHTML = `
-            <div class="radar-dot" style="width:${size}; height:${size}; background:${color}; border-radius:50%; box-shadow: 0 0 10px ${color}66; transition: all 0.4s ease;"></div>
-            <div class="radar-label" style="display: ${labelDisplay}; position: absolute; left: 14px; top: -8px; color: ${color}; font-family: monospace; font-size: 10px; text-shadow: 2px 2px 2px black; pointer-events: none;">
-              ${f.callsign || "UNK"}<br>${altFt.toLocaleString()}FT<br>${kts}KT
-            </div>
-          `;
+              <div class="radar-dot" style="width:${size}; height:${size}; background:${color}; border-radius:50%; box-shadow: 0 0 10px ${color}66; transition: all 0.4s ease;"></div>
+              <div class="radar-label" style="display: ${labelDisplay}; position: absolute; left: 14px; top: -8px; color: ${color}; font-family: monospace; font-size: 10px; text-shadow: 2px 2px 2px black; pointer-events: none;">
+                ${f.callsign || "UNK"}<br>${altFt.toLocaleString()}FT<br>${kts}KT
+              </div>
+            `;
             const popup = new maplibregl.Popup({
               offset: 15,
               closeButton: false,
               className: "tactical-popup",
             })
               .setHTML(`<div style="background: rgba(0,0,0,0.9); border: 1px solid ${color}; padding: 8px; font-family: monospace; color: ${color}; min-width: 120px;">
-                <b style="border-bottom: 1px solid ${color}44; display: block; margin-bottom: 4px;">${f.callsign || "ADS-B UNK"}</b>
+                <b style="border-bottom: 1px solid ${color}44; display: block; margin-bottom: 4px;">${f.callsign || "UNK"}</b>
                 <div style="font-size: 10px;">
                   ALT: <span style="color: #fff;">${altFt.toLocaleString()} FT</span><br>
                   SPD: <span style="color: #fff;">${kts} KTS</span><br>
@@ -122,7 +196,6 @@ export default function TacticalMapPage() {
           }
         });
 
-        // Cleanup
         Object.keys(markers.current).forEach((icao) => {
           if (!currentIcaos.includes(icao)) {
             markers.current[icao].remove();
@@ -131,7 +204,6 @@ export default function TacticalMapPage() {
           }
         });
 
-        // Update Trail source
         const trailFeatures = Object.keys(trails.current)
           .filter((icao) => trails.current[icao].length > 1)
           .map((icao) => ({
@@ -162,10 +234,15 @@ export default function TacticalMapPage() {
       <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
 
       {/* HUD Overlay */}
-      <div className="absolute top-6 left-6 z-10 p-4 border border-emerald-900 bg-black/80 font-mono">
-        <h1 className="text-emerald-500 text-lg font-bold italic">RADAR</h1>
-        <p className="text-emerald-800 text-[10px]">
-          TARGETS IN SECTOR: {flights.length}
+      <div className="absolute top-6 left-6 z-10 p-4 border border-emerald-900 bg-black/80 font-mono min-w-[180px]">
+        <h1 className="text-emerald-500 text-lg font-bold italic border-b border-emerald-900/50 mb-1">
+          DFW RADAR
+        </h1>
+        <p className="text-emerald-400 text-2xl font-bold tracking-tighter tabular-nums">
+          {zuluTime}
+        </p>
+        <p className="text-emerald-800 text-[10px] mt-2 uppercase tracking-widest">
+          Primary Targets: {flights.length}
         </p>
       </div>
 
