@@ -91,63 +91,53 @@ export default function TacticalMapPage() {
     return () => mapInstance.remove();
   }, []);
 
-  // 3. METAR & RADAR FETCH (Every 15s to avoid 429)
+  // 3. UNIFIED METAR & RADAR FETCH
   useEffect(() => {
     const fetchData = async () => {
       // --- FETCH METAR ---
       try {
-        const mRes = await fetch(
-          "https://avwx.rest/api/metar/KDFW?token=YOUR_TOKEN_OPTIONAL",
-          {
-            headers: { Authorization: "BEARER YOUR_TOKEN_IF_NEEDED" }, // AVWX or check CheckWX
-          },
-        );
-        // Note: For simplicity without a token, many use the aviationweather.gov text API
-        const mResText = await fetch(
-          "https://www.aviationweather.gov/cgi-bin/data/metar.php?ids=KDFW",
-        );
-        const rawMetar = await mResText.text();
-
-        let cat: MetarData["category"] = "VFR";
-        let color = "#10b981"; // Green
-
-        if (rawMetar.includes(" OVC00") || rawMetar.includes(" VV00")) {
-          cat = "LIFR";
-          color = "#f472b6";
-        } else if (
-          rawMetar.includes(" OVC005") ||
-          rawMetar.includes(" OVC009")
-        ) {
-          cat = "IFR";
-          color = "#ef4444";
-        } else if (
-          rawMetar.includes(" BKN01") ||
-          rawMetar.includes(" BKN02") ||
-          rawMetar.includes(" OVC01") ||
-          rawMetar.includes(" OVC02")
-        ) {
-          cat = "MVFR";
-          color = "#60a5fa";
+        const mRes = await fetch("/api/metar");
+        if (mRes.ok) {
+          const mData = await mRes.json();
+          if (mData && mData.length > 0) {
+            const kdfw = mData[0];
+            const category = kdfw.fltCat || "VFR";
+            const colorMap: any = {
+              VFR: "#10b981",
+              MVFR: "#60a5fa",
+              IFR: "#ef4444",
+              LIFR: "#f472b6",
+            };
+            setMetar({
+              raw: kdfw.rawOb,
+              category: category,
+              color: colorMap[category] || "#666",
+            });
+          }
         }
-
-        setMetar({
-          raw: rawMetar.trim().substring(0, 50) + "...",
-          category: cat,
-          color,
-        });
       } catch (e) {
-        console.error("METAR Fail");
+        console.warn("METAR Proxy Error:", e);
       }
 
       // --- FETCH RADAR ---
       try {
-        const res = await fetch(
-          "https://opensky-network.org/api/states/all?lamin=32.5&lomin=-97.5&lamax=33.5&lomax=-96.5",
-        );
+        const res = await fetch("/api/radar");
+        if (!res.ok) {
+          const errorDetail = await res.json();
+          console.error("API Proxy Error:", res.status, errorDetail);
+          return;
+        }
+
         const rawData = await res.json();
-        const data: Flight[] = (rawData.states || []).map((s: any) => ({
+        if (!rawData.states) {
+          console.warn("Radar connected, but no states returned.");
+          setFlights([]);
+          return;
+        }
+
+        const data: Flight[] = rawData.states.map((s: any) => ({
           icao24: s[0],
-          callsign: s[1].trim() || "UNK",
+          callsign: (s[1] || "UNK").trim(),
           longitude: s[5],
           latitude: s[6],
           altitude: s[7] || 0,
@@ -155,9 +145,10 @@ export default function TacticalMapPage() {
           velocity: s[9] || 0,
           heading: s[10] || 0,
         }));
+
         setFlights(data);
       } catch (e) {
-        console.error("Radar 429");
+        console.error("Radar Fetch Error:", e);
       }
     };
 
@@ -173,7 +164,7 @@ export default function TacticalMapPage() {
         prev.map((f) => {
           if (f.on_ground || f.velocity === 0) return f;
           const R = 6378137;
-          const d = f.velocity; // distance moved in 1s
+          const d = f.velocity;
           const brng = (f.heading * Math.PI) / 180;
           const lat1 = (f.latitude * Math.PI) / 180;
           const lon1 = (f.longitude * Math.PI) / 180;
@@ -201,38 +192,86 @@ export default function TacticalMapPage() {
     return () => clearInterval(nudge);
   }, []);
 
-  // 5. MARKER SYNCHRONIZATION
+  // 5. MARKER & POPUP SYNCHRONIZATION
   useEffect(() => {
-    if (!map.current || !map.current.isStyleLoaded()) return;
+    if (!map.current) return;
 
     flights.forEach((f) => {
       const isCompany =
         f.callsign.startsWith("ENY") || f.callsign.startsWith("AAL");
       const altFt = Math.round(f.altitude * 3.28084);
       const kts = Math.round(f.velocity * 1.944);
+
+      const isLow = f.on_ground || altFt < 600;
       const color = isCompany ? "#60a5fa" : "#10b981";
+      const size = isLow ? "4px" : "10px";
+      const opacity = isLow ? "0.3" : "1";
+      const labelDisplay = !isLow || isCompany ? "block" : "none";
+
+      // 1. Define the Popup Content
+      const popupHTML = `
+        <div style="background: rgba(0,0,0,0.9); border: 1px solid ${color}; padding: 8px; font-family: monospace; color: ${color}; min-width: 140px; box-shadow: 0 0 15px ${color}44;">
+          <b style="border-bottom: 1px solid ${color}44; display: block; margin-bottom: 4px; font-size: 12px;">${f.callsign || "ADS-B UNK"}</b>
+          <div style="font-size: 10px; line-height: 1.4;">
+            ALT: <span style="color: #fff;">${altFt.toLocaleString()} FT</span><br>
+            SPD: <span style="color: #fff;">${kts} KTS</span><br>
+            HDG: <span style="color: #fff;">${Math.round(f.heading)}°</span><br>
+            ICAO: <span style="color: #666;">${f.icao24.toUpperCase()}</span>
+          </div>
+        </div>`;
 
       if (markers.current[f.icao24]) {
-        const el = markers.current[f.icao24].getElement();
+        const marker = markers.current[f.icao24];
+        marker.setLngLat([f.longitude, f.latitude]);
+
+        // Update the existing popup if it's open
+        const popup = marker.getPopup();
+        if (popup && popup.isOpen()) {
+          popup.setHTML(popupHTML);
+        }
+
+        const el = marker.getElement();
+        const dot = el.querySelector(".radar-dot") as HTMLElement;
         const label = el.querySelector(".radar-label") as HTMLElement;
-        if (label)
-          label.innerHTML = `${f.callsign}<br>${altFt.toLocaleString()}FT<br>${kts}KT`;
+
+        if (dot) {
+          dot.style.width = size;
+          dot.style.height = size;
+          dot.style.background = color;
+          el.style.opacity = opacity;
+        }
+        if (label) {
+          label.style.display = labelDisplay;
+          label.style.color = color;
+          label.innerHTML = `${f.callsign || "UNK"}<br>${altFt.toLocaleString()}FT<br>${kts}KT`;
+        }
       } else {
+        // Create New Marker with Popup
         const el = document.createElement("div");
         el.className = "radar-blip-container";
+        el.style.opacity = opacity;
+        el.style.cursor = "pointer"; // Make it clear it's clickable
+
         el.innerHTML = `
-          <div class="radar-dot" style="width:10px; height:10px; background:${color}; border-radius:50%; box-shadow: 0 0 10px ${color}66;"></div>
-          <div class="radar-label" style="position: absolute; left: 14px; top: -8px; color: ${color}; font-family: monospace; font-size: 10px; text-shadow: 2px 2px 2px black; pointer-events: none;">
-            ${f.callsign}<br>${altFt.toLocaleString()}FT<br>${kts}KT
+          <div class="radar-dot" style="width:${size}; height:${size}; background:${color}; border-radius:50%; box-shadow: 0 0 10px ${color}66;"></div>
+          <div class="radar-label" style="display: ${labelDisplay}; position: absolute; left: 14px; top: -8px; color: ${color}; font-family: monospace; font-size: 10px; text-shadow: 2px 2px 2px black; pointer-events: none; white-space: nowrap;">
+            ${f.callsign || "UNK"}<br>${altFt.toLocaleString()}FT<br>${kts}KT
           </div>
         `;
+
+        const newPopup = new maplibregl.Popup({
+          offset: 15,
+          closeButton: false,
+          className: "tactical-popup",
+        }).setHTML(popupHTML);
+
         markers.current[f.icao24] = new maplibregl.Marker({ element: el })
           .setLngLat([f.longitude, f.latitude])
+          .setPopup(newPopup) // Re-attach the click listener
           .addTo(map.current!);
       }
     });
 
-    // Cleanup dead markers
     const currentIds = flights.map((f) => f.icao24);
     Object.keys(markers.current).forEach((id) => {
       if (!currentIds.includes(id)) {
@@ -241,7 +280,6 @@ export default function TacticalMapPage() {
       }
     });
   }, [flights]);
-
   return (
     <main className="relative w-screen h-screen bg-[#0a0a0a] overflow-hidden">
       <div ref={mapContainer} className="absolute inset-0 w-full h-full" />

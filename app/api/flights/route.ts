@@ -1,36 +1,35 @@
 import { NextResponse } from "next/server";
 
 export async function GET() {
-  // Bounding box for DFW area (min lat, min lon, max lat, max lon)
-  const LAMBDA_DFW = {
-    lamin: 32.5,
-    lomin: -97.5,
-    lamax: 33.5,
-    lomax: -96.5,
-  };
+  const auth = "Basic ZmVybmFuZG9tZW5kZXppbzpwYXR4ZTAtR2lxbWFzLXFva3Nvcw==";
+  // Slightly wider DFW box to ensure we catch arrivals from farther out
+  const url =
+    "https://opensky-network.org/api/states/all?lamin=32.0&lomin=-98.0&lamax=34.0&lomax=-96.0";
 
   try {
-    const response = await fetch(
-      `https://opensky-network.org/api/states/all?lamin=${LAMBDA_DFW.lamin}&lomin=${LAMBDA_DFW.lomin}&lamax=${LAMBDA_DFW.lamax}&lomax=${LAMBDA_DFW.lomax}`,
-      { next: { revalidate: 10 } }, // Re-fetch every 10 seconds
-    );
+    const res = await fetch(url, {
+      headers: {
+        Authorization: auth,
+        Accept: "application/json",
+      },
+      next: { revalidate: 0 },
+    });
 
-    const data = await response.json();
+    if (!res.ok) {
+      console.error(`OpenSky error: ${res.status}`);
+      return NextResponse.json(
+        { error: "OpenSky denied access", states: [] },
+        { status: res.status },
+      );
+    }
 
-    // Map the raw OpenSky array into a readable format
-    const flights = (data.states || []).map((s: any) => ({
-      icao24: s[0],
-      callsign: s[1].trim(),
-      origin_country: s[2],
-      longitude: s[5],
-      latitude: s[6],
-      altitude: s[7], // Barometric altitude in meters
-      velocity: s[9], // Velocity in m/s
-      heading: s[10],
-    }));
-
-    return NextResponse.json(flights);
+    const data = await res.json();
+    console.log(`Fetched ${data.states?.length || 0} targets from OpenSky`);
+    return NextResponse.json(data);
   } catch (error) {
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Proxy Failed", states: [] },
+      { status: 500 },
+    );
   }
 }
