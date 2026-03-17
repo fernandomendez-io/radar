@@ -27,7 +27,7 @@ export default function TacticalMapPage() {
 
     const mapInstance = new maplibregl.Map({
       container: mapContainer.current,
-      style: "https://tiles.stadiamaps.com/styles/alidade_smooth_dark.json",
+      style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
       center: [-97.0403, 32.8982], // DFW
       zoom: 12,
       pitch: 0,
