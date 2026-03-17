@@ -14,11 +14,6 @@ interface Flight {
   heading: number;
 }
 
-// Bypasses CSP 'eval' issues by disabling the worker thread for Raster
-if (typeof window !== "undefined") {
-  maplibregl.workerCount = 0;
-}
-
 export default function TacticalMapPage() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
