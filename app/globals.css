@@ -24,3 +24,37 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Make the popup tip and background match our radar theme */
+.maplibregl-popup-content {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+
+.maplibregl-popup-tip {
+  border-top-color: #10b981 !important;
+  border-bottom-color: #10b981 !important;
+}
+/* Increase specificity by nesting under the main map class */
+.maplibregl-map .maplibregl-popup-content {
+  background-color: rgba(0, 0, 0, 0.9) !important;
+  color: #10b981 !important;
+  border: 1px solid #10b981 !important;
+  border-radius: 0px !important; /* Squared off for that tactical look */
+  padding: 0 !important;
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.2) !important;
+}
+
+/* Hide the default close button if it's still showing */
+.maplibregl-map .maplibregl-popup-close-button {
+  display: none !important;
+}
+
+/* Style the "tip" (the little triangle) to match the border */
+.maplibregl-map .maplibregl-popup-tip {
+  border-top-color: #10b981 !important;
+  border-bottom-color: #10b981 !important;
+  border-left-color: #10b981 !important;
+  border-right-color: #10b981 !important;
+}

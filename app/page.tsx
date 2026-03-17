@@ -1,65 +1,212 @@
-import Image from "next/image";
+"use client";
+import { useEffect, useRef, useState } from "react";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 
-export default function Home() {
+interface Flight {
+  icao24: string;
+  callsign: string;
+  longitude: number;
+  latitude: number;
+  altitude: number;
+  on_ground: boolean;
+  velocity: number;
+  heading: number;
+}
+
+export default function TacticalMapPage() {
+  const mapContainer = useRef<HTMLDivElement>(null);
+  const map = useRef<maplibregl.Map | null>(null);
+  const markers = useRef<{ [key: string]: maplibregl.Marker }>({});
+  const [flights, setFlights] = useState<Flight[]>([]);
+  const trails = useRef<{ [key: string]: [number, number][] }>({});
+
+  // 1. Initialize Map
+  useEffect(() => {
+    if (map.current || !mapContainer.current) return;
+
+    const mapInstance = new maplibregl.Map({
+      container: mapContainer.current,
+      style: "https://tiles.stadiamaps.com/styles/alidade_smooth_dark.json",
+      center: [-97.0403, 32.8982], // DFW
+      zoom: 12,
+      pitch: 0,
+    });
+
+    mapInstance.on("load", () => {
+      map.current = mapInstance;
+
+      // Initialize the Trail Source
+      mapInstance.addSource("plane-trails", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+
+      // Initialize the Trail Layer (The "Comet Tail")
+      mapInstance.addLayer({
+        id: "plane-trails-layer",
+        type: "line",
+        source: "plane-trails",
+        layout: {
+          "line-join": "round",
+          "line-cap": "round",
+        },
+        paint: {
+          "line-color": "#10b981",
+          "line-width": 2,
+          "line-opacity": 0.4,
+          "line-dasharray": [2, 1], // Dotted tactical look
+        },
+      });
+    });
+
+    return () => {
+      mapInstance.remove();
+      map.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateRadar = async () => {
+      try {
+        const res = await fetch("/api/flights");
+        const data = await res.json();
+        setFlights(data || []);
+
+        if (!map.current || !map.current.isStyleLoaded()) return;
+
+        const currentIcaos = data.map((f: Flight) => f.icao24);
+
+        data.forEach((f: Flight) => {
+          const isCompany =
+            f.callsign.startsWith("ENY") || f.callsign.startsWith("AAL");
+          const altFt = Math.round(f.altitude * 3.28084);
+          const kts = Math.round(f.velocity * 1.944);
+
+          // Squelch & Visuals
+          const isLow = f.on_ground || altFt < 600;
+          const color = isCompany ? "#60a5fa" : "#10b981";
+          const size = isLow ? "3px" : "10px";
+          const opacity = isLow ? "0.3" : "1";
+          const labelDisplay = isLow && !isCompany ? "none" : "block";
+
+          // 2. TRAIL LOGIC (Record position history)
+          if (!f.on_ground) {
+            if (!trails.current[f.icao24]) trails.current[f.icao24] = [];
+            trails.current[f.icao24].push([f.longitude, f.latitude]);
+            if (trails.current[f.icao24].length > 10)
+              trails.current[f.icao24].shift();
+          }
+
+          if (markers.current[f.icao24]) {
+            const marker = markers.current[f.icao24];
+            marker.setLngLat([f.longitude, f.latitude]);
+
+            const el = marker.getElement();
+            const dot = el.querySelector(".radar-dot") as HTMLElement;
+            const label = el.querySelector(".radar-label") as HTMLElement;
+
+            if (dot) {
+              dot.style.width = size;
+              dot.style.height = size;
+              dot.style.background = color;
+              el.style.opacity = opacity;
+            }
+            if (label) {
+              label.style.display = labelDisplay;
+              label.style.color = color;
+              label.innerHTML = `${f.callsign || "UNK"}<br>${altFt.toLocaleString()}FT<br>${kts}KT`;
+            }
+          } else {
+            const el = document.createElement("div");
+            el.className = "radar-blip-container";
+            el.style.opacity = opacity;
+            el.style.zIndex = isLow ? "1" : "100";
+
+            el.innerHTML = `
+              <div class="radar-dot" style="width:${size}; height:${size}; background:${color}; border-radius:50%; box-shadow: 0 0 10px ${color}66; transition: all 0.4s ease;"></div>
+              <div class="radar-label" style="display: ${labelDisplay}; position: absolute; left: 14px; top: -8px; color: ${color}; font-family: monospace; font-size: 10px; text-shadow: 2px 2px 2px black; pointer-events: none;">
+                ${f.callsign || "UNK"}<br>${altFt.toLocaleString()}FT<br>${kts}KT
+              </div>
+            `;
+
+            const popup = new maplibregl.Popup({
+              offset: 15,
+              closeButton: false,
+              className: "tactical-popup",
+            }).setHTML(`
+              <div style="background: rgba(0,0,0,0.9); border: 1px solid ${color}; padding: 8px; font-family: monospace; color: ${color}; min-width: 120px;">
+                <b style="border-bottom: 1px solid ${color}44; display: block; margin-bottom: 4px;">${f.callsign || "ADS-B UNK"}</b>
+                <div style="font-size: 10px;">
+                  ALT: <span style="color: #fff;">${altFt.toLocaleString()} FT</span><br>
+                  SPD: <span style="color: #fff;">${kts} KTS</span><br>
+                  ID: <span style="color: #666;">${f.icao24.toUpperCase()}</span>
+                </div>
+              </div>
+            `);
+
+            const marker = new maplibregl.Marker({ element: el })
+              .setLngLat([f.longitude, f.latitude])
+              .setPopup(popup)
+              .addTo(map.current!);
+
+            markers.current[f.icao24] = marker;
+          }
+        });
+
+        // 3. CLEANUP
+        Object.keys(markers.current).forEach((icao) => {
+          if (!currentIcaos.includes(icao)) {
+            markers.current[icao].remove();
+            delete markers.current[icao];
+            delete trails.current[icao];
+          }
+        });
+
+        // 4. DRAW TRAILS (Update the GeoJSON Source)
+        const trailFeatures = Object.keys(trails.current)
+          .filter((icao) => trails.current[icao].length > 1)
+          .map((icao) => ({
+            type: "Feature",
+            geometry: {
+              type: "LineString",
+              coordinates: trails.current[icao],
+            },
+          }));
+
+        const trailSource = map.current.getSource(
+          "plane-trails",
+        ) as maplibregl.GeoJSONSource;
+        if (trailSource) {
+          trailSource.setData({
+            type: "FeatureCollection",
+            features: trailFeatures as any,
+          });
+        }
+      } catch (e) {
+        console.error("Radar sweep failed...", e);
+      }
+    };
+
+    const interval = setInterval(updateRadar, 4000);
+    updateRadar();
+    return () => clearInterval(interval);
+  }, []);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+    <main className="relative w-screen h-screen bg-[#0a0a0a] overflow-hidden">
+      <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
+
+      {/* HUD Overlay */}
+      <div className="absolute top-6 left-6 z-10 p-4 border border-emerald-900 bg-black/80 font-mono">
+        <h1 className="text-emerald-500 text-lg font-bold italic">RADAR</h1>
+        <p className="text-emerald-800 text-[10px]">
+          TARGETS IN SECTOR: {flights.length}
+        </p>
+      </div>
+
+      {/* CRT Scanline Overlay */}
+      <div className="absolute inset-0 pointer-events-none z-20 opacity-10 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] bg-[length:100%_2px,3px_100%]" />
+    </main>
   );
 }
