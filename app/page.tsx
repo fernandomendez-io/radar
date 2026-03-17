@@ -20,15 +20,16 @@ interface MetarData {
   color: string;
 }
 
-const MAX_TRAIL_POINTS = 30; // ~30 seconds of history
+const MAX_TRAIL_POINTS = 30;
 
 export default function TacticalMapPage() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const mapReady = useRef(false);
   const markers = useRef<{ [key: string]: maplibregl.Marker }>({});
-  const [flights, setFlights] = useState<Flight[]>([]);
   const trails = useRef<{ [key: string]: [number, number][] }>({});
+  const flightsRef = useRef<Flight[]>([]); // <-- ref so nudge can read latest without dep
+  const [flights, setFlights] = useState<Flight[]>([]);
   const [zuluTime, setZuluTime] = useState("");
   const [metar, setMetar] = useState<MetarData>({
     raw: "LOADING METAR...",
@@ -151,6 +152,20 @@ export default function TacticalMapPage() {
             heading: s[10] || 0,
           }));
 
+        // Seed trail with current position on fetch
+        data.forEach((f) => {
+          if (!f.on_ground && f.velocity >= 10) {
+            if (!trails.current[f.icao24]) {
+              trails.current[f.icao24] = [];
+            }
+            trails.current[f.icao24].push([f.longitude, f.latitude]);
+            if (trails.current[f.icao24].length > MAX_TRAIL_POINTS) {
+              trails.current[f.icao24].shift();
+            }
+          }
+        });
+
+        flightsRef.current = data;
         setFlights(data);
       } catch (e) {
         console.error("Flights fetch error:", e);
@@ -163,72 +178,81 @@ export default function TacticalMapPage() {
   }, []);
 
   // 4. INTERPOLATION NUDGE + TRAIL UPDATE (Every 1s)
+  // No deps — uses refs only so the interval never resets
   useEffect(() => {
+    const updateTrails = () => {
+      if (!mapReady.current || !map.current) return;
+      const source = map.current.getSource(
+        "plane-trails",
+      ) as maplibregl.GeoJSONSource;
+      if (!source) return;
+
+      source.setData({
+        type: "FeatureCollection",
+        features: Object.entries(trails.current)
+          .filter(([, coords]) => coords.length >= 2)
+          .map(([icao24, coords]) => {
+            const flight = flightsRef.current.find((f) => f.icao24 === icao24);
+            const isCompany =
+              flight?.callsign.startsWith("ENY") ||
+              flight?.callsign.startsWith("AAL");
+            return {
+              type: "Feature" as const,
+              properties: { color: isCompany ? "#60a5fa" : "#10b981" },
+              geometry: { type: "LineString" as const, coordinates: coords },
+            };
+          }),
+      });
+    };
+
     const nudge = setInterval(() => {
-      setFlights((prev) =>
-        prev.map((f) => {
-          if (f.on_ground || f.velocity < 10) return f;
+      // Interpolate positions
+      flightsRef.current = flightsRef.current.map((f) => {
+        if (f.on_ground || f.velocity < 10) return f;
 
-          const R = 6378137;
-          const d = f.velocity;
-          const brng = (f.heading * Math.PI) / 180;
-          const lat1 = (f.latitude * Math.PI) / 180;
-          const lon1 = (f.longitude * Math.PI) / 180;
-          const lat2 = Math.asin(
-            Math.sin(lat1) * Math.cos(d / R) +
-              Math.cos(lat1) * Math.sin(d / R) * Math.cos(brng),
+        const R = 6378137;
+        const d = f.velocity;
+        const brng = (f.heading * Math.PI) / 180;
+        const lat1 = (f.latitude * Math.PI) / 180;
+        const lon1 = (f.longitude * Math.PI) / 180;
+        const lat2 = Math.asin(
+          Math.sin(lat1) * Math.cos(d / R) +
+            Math.cos(lat1) * Math.sin(d / R) * Math.cos(brng),
+        );
+        const lon2 =
+          lon1 +
+          Math.atan2(
+            Math.sin(brng) * Math.sin(d / R) * Math.cos(lat1),
+            Math.cos(d / R) - Math.sin(lat1) * Math.sin(lat2),
           );
-          const lon2 =
-            lon1 +
-            Math.atan2(
-              Math.sin(brng) * Math.sin(d / R) * Math.cos(lat1),
-              Math.cos(d / R) - Math.sin(lat1) * Math.sin(lat2),
-            );
 
-          const newLon = (lon2 * 180) / Math.PI;
-          const newLat = (lat2 * 180) / Math.PI;
+        const newLon = (lon2 * 180) / Math.PI;
+        const newLat = (lat2 * 180) / Math.PI;
 
-          // Append to trail, cap length
-          if (!trails.current[f.icao24]) trails.current[f.icao24] = [];
-          trails.current[f.icao24].push([newLon, newLat]);
-          if (trails.current[f.icao24].length > MAX_TRAIL_POINTS) {
-            trails.current[f.icao24].shift();
-          }
-
-          return { ...f, longitude: newLon, latitude: newLat };
-        }),
-      );
-
-      // Push updated trails into map source
-      if (mapReady.current && map.current) {
-        const source = map.current.getSource(
-          "plane-trails",
-        ) as maplibregl.GeoJSONSource;
-        if (source) {
-          source.setData({
-            type: "FeatureCollection",
-            features: Object.entries(trails.current)
-              .filter(([, coords]) => coords.length >= 2)
-              .map(([icao24, coords]) => {
-                const isCompany =
-                  (
-                    flights.find((f) => f.icao24 === icao24)?.callsign || ""
-                  ).startsWith("ENY") ||
-                  (
-                    flights.find((f) => f.icao24 === icao24)?.callsign || ""
-                  ).startsWith("AAL");
-                return {
-                  type: "Feature",
-                  properties: { color: isCompany ? "#60a5fa" : "#10b981" },
-                  geometry: { type: "LineString", coordinates: coords },
-                };
-              }),
-          });
+        // Update marker position directly without triggering re-render
+        if (markers.current[f.icao24]) {
+          markers.current[f.icao24].setLngLat([newLon, newLat]);
         }
-      }
+
+        // Append to trail
+        if (!trails.current[f.icao24]) trails.current[f.icao24] = [];
+        trails.current[f.icao24].push([newLon, newLat]);
+        if (trails.current[f.icao24].length > MAX_TRAIL_POINTS) {
+          trails.current[f.icao24].shift();
+        }
+
+        return { ...f, longitude: newLon, latitude: newLat };
+      });
+
+      // Update map trails
+      updateTrails();
+
+      // Sync state for HUD (targets count etc) every nudge
+      setFlights([...flightsRef.current]);
     }, 1000);
+
     return () => clearInterval(nudge);
-  }, [flights]); // flights in dep array so trail lookup stays fresh
+  }, []); // empty deps — intentional
 
   // 5. MARKER SYNC
   useEffect(() => {
@@ -300,13 +324,12 @@ export default function TacticalMapPage() {
       }
     });
 
-    // Remove stale markers and trails
     const currentIds = new Set(flights.map((f) => f.icao24));
     Object.keys(markers.current).forEach((id) => {
       if (!currentIds.has(id)) {
         markers.current[id].remove();
         delete markers.current[id];
-        delete trails.current[id]; // clean up trail too
+        delete trails.current[id];
       }
     });
   }, [flights]);
